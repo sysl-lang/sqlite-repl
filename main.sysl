@@ -71,17 +71,18 @@ show(q: Query, style: Style) -> Result[int, string]
     val ncols = q.columns()
 
     var t = table()
+
+    // The one annotation this program cannot do without: `buf()` has nothing to infer its element
+    // type from until something is pushed, and it says so rather than guessing.
     var head: Buf[&Display] = buf()
-    var c = 0
 
     t.set_style(style)
     t.set_dividers(true)
 
     // A column whose name SQLite will not supply is shown by its position, so a row of values is
     // never laid out under a gap.
-    while c < ncols
+    for c in 0..<ncols
         head.push(q.name_at(c).unwrap_or(s"column $c"))
-        c += 1
 
     t.header(head.view())
 
@@ -96,14 +97,11 @@ show(q: Query, style: Style) -> Result[int, string]
 
                 if more
                     var row: Buf[&Display] = buf()
-                    var i = 0
 
-                    while i < ncols
+                    for i in 0..<ncols
                         q.text_at(i) match
                             Err(why) -> return Err(why)
                             Ok(v) -> row.push(v.unwrap_or(Null))
-
-                        i += 1
 
                     t.add(row.view())
                     rows += 1
@@ -154,25 +152,25 @@ end run
 // other than blanks after it.
 multiple(sql: string) -> bool
     val b = sql.bytes
-    var quote = 0u8
-    var i = 0usize
 
-    while i < b.len
+    // Zero is not a byte any SQL holds, so it does for "not inside quotes" and saves carrying a
+    // second flag beside the quote character.
+    var quote: u8 = 0
+
+    for i in 0..<b.len
         val c = b[i]
 
-        if quote != 0u8
-            if c == quote then quote = 0u8
-        elif c == 39u8 || c == 34u8
+        if quote != 0
+            if c == quote then quote = 0
+        elif c == u8('\'') || c == u8('"')
             quote = c
-        elif c == 59u8
-            var j = i + 1usize
+        elif c == u8(';')
+            var j = i + 1
 
             while j < b.len && b[j].is_space()
-                j += 1usize
+                j += 1
 
             if j < b.len then return true
-
-        i += 1usize
 
     false
 end multiple
@@ -207,7 +205,7 @@ main(args: []string)
     // No file named means an in-memory database, which is SQLite's own spelling and not this
     // program's invention: it is what you want for trying something out, and it is why this example
     // can be run without preparing anything first.
-    val path = if args.len > 1usize then args[1usize] else ":memory:"
+    val path = if args.len > 1 then args[1] else ":memory:"
     val asked = open(path)
 
     if asked.is_err()
@@ -244,7 +242,7 @@ main(args: []string)
 
                     if text.starts_with(".")
                         val parts = fields(text)
-                        val name = parts[0usize]
+                        val name = parts[0]
 
                         if name == ".quit" || name == ".exit"
                             going = false
@@ -255,12 +253,12 @@ main(args: []string)
                         elif name == ".schema"
                             run(db, SchemaSql, style)
                         elif name == ".style"
-                            if parts.len != 2usize
+                            if parts.len != 2
                                 fail("say which style -- .help lists them")
                             else
-                                style_of(parts[1usize]) match
+                                style_of(parts[1]) match
                                     Some(s) -> style = s
-                                    None -> fail(s"there is no style called ${parts[1usize]}")
+                                    None -> fail(s"there is no style called ${parts[1]}")
                         else
                             fail(s"there is no command called $name -- try .help")
                     elif multiple(text)
