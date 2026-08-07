@@ -1,0 +1,272 @@
+// A SQLite prompt: type SQL, see the answer laid out.
+//
+// It exists to be the org's worked example of a program with **more than one dependency**, which is
+// a different thing from a program with one. `monocypher-example` shows what a single package feels
+// like to use; this shows what happens when three of them have to be a program together, and the
+// answer is that each one owns a third of the loop and none of them knows the other two exist:
+//
+//     linenoise  reads a line, with history and the arrow keys
+//     sqlite     runs it
+//     table      lays the rows out so the columns line up
+//
+// **Nothing here glues them together, and that is the point worth reading.** There is no adapter, no
+// shared type and no configuration passed between packages. `read` answers with an `Option[string]`,
+// `text_at` answers with a `Result[Option[string], string]`, and `add` takes anything that renders --
+// so the seams are the standard module's own types, which all three were written against separately.
+// A program is what happens when those line up.
+//
+//     sysl run . -- mydata.db
+//     sysl run .                  -- no file named, so an in-memory database
+//
+// **One statement per line.** The binding compiles a single statement and passes SQLite no pointer to
+// whatever followed it, so a line holding two would run the first and drop the rest silently. Rather
+// than let that happen this refuses the line, which is the one place this program looks at SQL text
+// instead of handing it straight over.
+
+import sh.sysl.linenoise.{history_add, history_load, history_save, history_set_max_len, read}
+import sh.sysl.sqlite.{Db, Query, open}
+import sh.sysl.table.*
+import sysl.buf.{Buf, buf}
+import sysl.text.{Ascii, Search, fields}
+
+// The history the arrow keys walk, kept beside the database rather than in the reader's home
+// directory: sysl has no way to ask for one, and a REPL that writes to the directory it was started
+// in is a REPL whose leavings are where the reader can see them.
+const HistoryFile: string = ".sqlite-repl-history"
+
+const TablesSql: string = "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name"
+
+const SchemaSql: string = "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name"
+
+// What a column holding SQL NULL is shown as. Nothing is not the same as the empty string, and a
+// table whose cell is blank cannot tell the reader which one it met.
+const Null: string = "NULL"
+
+fail(why: string) = eprints(s"error: $why\n")
+
+// -- Running one statement -------------------------------------------------------------------------
+
+// Step a statement that returns no rows -- a `CREATE`, an `INSERT`, a `PRAGMA` -- to completion.
+//
+// The answer is the row count so that this and `show` have one shape between them, and for a
+// statement with no columns it is always zero.
+drain(q: Query) -> Result[int, string]
+    var going = true
+
+    while going
+        q.step() match
+            Err(why) -> return Err(why)
+            Ok(more) -> going = more
+
+    Ok(0)
+end drain
+
+// Read every row of a statement that has columns, and render them.
+//
+// The table is built as the rows arrive rather than after them, which it has to be: a text column's
+// bytes belong to SQLite and stay valid only until the next `step`, so a row that is not rendered
+// now is a row whose contents have moved. `add` renders each cell as it is handed over, so the
+// storage the table keeps is its own.
+show(q: Query, style: Style) -> Result[int, string]
+    val ncols = q.columns()
+
+    var t = table()
+    var head: Buf[&Display] = buf()
+    var c = 0
+
+    t.set_style(style)
+    t.set_dividers(true)
+
+    // A column whose name SQLite will not supply is shown by its position, so a row of values is
+    // never laid out under a gap.
+    while c < ncols
+        head.push(q.name_at(c).unwrap_or(s"column $c"))
+        c += 1
+
+    t.header(head.view())
+
+    var rows = 0
+    var going = true
+
+    while going
+        q.step() match
+            Err(why) -> return Err(why)
+            Ok(more) ->
+                going = more
+
+                if more
+                    var row: Buf[&Display] = buf()
+                    var i = 0
+
+                    while i < ncols
+                        q.text_at(i) match
+                            Err(why) -> return Err(why)
+                            Ok(v) -> row.push(v.unwrap_or(Null))
+
+                        i += 1
+
+                    t.add(row.view())
+                    rows += 1
+
+    // `prints` and not `print`: a rendered table already ends in the newline that closed its last
+    // row, and the line-adding one would leave a blank line under every answer.
+    prints(t.text())
+    Ok(rows)
+end show
+
+// Compile one statement, run it, and say what came of it.
+//
+// The statement is finalized on every path including the failing ones. sysl has no destructor, so a
+// handle nobody was told to release is a handle SQLite still holds -- and a `Query` is C's storage
+// rather than this program's.
+run(db: Db, sql: string, style: Style)
+    val asked = db.prepare(sql)
+
+    if asked.is_err()
+        fail(asked.unwrap_err())
+        return
+
+    val q = asked.unwrap()
+    // Asked before the statement is finalized and kept, not asked again after. `finalize` releases
+    // SQLite's storage, and every method here is a call through a handle into it -- so a question
+    // put to a `Query` afterwards reads memory the library has taken back.
+    val ncols = q.columns()
+    val outcome = if ncols == 0 then drain(q) else show(q, style)
+
+    q.finalize()
+
+    if outcome.is_err()
+        fail(outcome.unwrap_err())
+    else
+        val n = outcome.unwrap()
+
+        if ncols == 0 then print("ok")
+        elif n == 1 then print("1 row")
+        else print(s"$n rows")
+end run
+
+// Whether a line holds more than one statement, which this program will not run.
+//
+// It is a text scan and not a parse, so it has to know what a semicolon inside quotes looks like:
+// SQL escapes a quote by doubling it, and a doubled quote reads here as a close immediately followed
+// by an open, which lands in the same state and needs no case of its own. A trailing semicolon is
+// not a second statement -- everyone types one -- so what is counted is a semicolon with something
+// other than blanks after it.
+multiple(sql: string) -> bool
+    val b = sql.bytes
+    var quote = 0u8
+    var i = 0usize
+
+    while i < b.len
+        val c = b[i]
+
+        if quote != 0u8
+            if c == quote then quote = 0u8
+        elif c == 39u8 || c == 34u8
+            quote = c
+        elif c == 59u8
+            var j = i + 1usize
+
+            while j < b.len && b[j].is_space()
+                j += 1usize
+
+            if j < b.len then return true
+
+        i += 1usize
+
+    false
+end multiple
+
+// -- The commands that are not SQL -------------------------------------------------------------------
+
+style_of(name: string) -> Option[Style]
+    if name == "plain" then return Some(Plain)
+    if name == "ascii" then return Some(Ascii)
+    if name == "light" then return Some(Light)
+    if name == "heavy" then return Some(Heavy)
+    if name == "double" then return Some(Double)
+    if name == "rounded" then return Some(Rounded)
+    if name == "markdown" then return Some(Markdown)
+
+    None
+end style_of
+
+help()
+    print("  .help            this")
+    print("  .tables          the tables and views in this database")
+    print("  .schema          the SQL that made them")
+    print("  .style <name>    plain, ascii, light, heavy, double, rounded, markdown")
+    print("  .quit            leave, saving the history")
+    print("")
+    print("  Anything else is one SQL statement. Ctrl-D leaves too.")
+end help
+
+// -- The loop ----------------------------------------------------------------------------------------
+
+main(args: []string)
+    // No file named means an in-memory database, which is SQLite's own spelling and not this
+    // program's invention: it is what you want for trying something out, and it is why this example
+    // can be run without preparing anything first.
+    val path = if args.len > 1usize then args[1usize] else ":memory:"
+    val asked = open(path)
+
+    if asked.is_err()
+        fail(s"$path: ${asked.unwrap_err()}")
+        exit(1)
+
+    val db = asked.unwrap()
+
+    print(s"sqlite-repl -- $path")
+    print("Type .help for the commands, or SQL for everything else.")
+
+    history_set_max_len(500)
+    history_load(HistoryFile)
+
+    var style = Light
+    var going = true
+
+    while going
+        read("sqlite> ") match
+            // End of input -- Ctrl-D on an empty line, or a pipe that ran out. An empty line is
+            // `Some("")` and is a different thing, which is why this is an `Option` and not a
+            // string that might be empty.
+            None ->
+                print("")
+                going = false
+
+            Some(line) ->
+                val text = line.trim()
+
+                if !text.is_empty()
+                    // Blank lines are not remembered, and neither is a repeat -- linenoise refuses
+                    // that one itself, which is why nothing here checks for it.
+                    history_add(text)
+
+                    if text.starts_with(".")
+                        val parts = fields(text)
+                        val name = parts[0usize]
+
+                        if name == ".quit" || name == ".exit"
+                            going = false
+                        elif name == ".help"
+                            help()
+                        elif name == ".tables"
+                            run(db, TablesSql, style)
+                        elif name == ".schema"
+                            run(db, SchemaSql, style)
+                        elif name == ".style"
+                            if parts.len != 2usize
+                                fail("say which style -- .help lists them")
+                            else
+                                style_of(parts[1usize]) match
+                                    Some(s) -> style = s
+                                    None -> fail(s"there is no style called ${parts[1usize]}")
+                        else
+                            fail(s"there is no command called $name -- try .help")
+                    elif multiple(text)
+                        fail("one statement at a time -- this prompt compiles a single statement")
+                    else
+                        run(db, text, style)
+
+    history_save(HistoryFile)
+    db.close()
