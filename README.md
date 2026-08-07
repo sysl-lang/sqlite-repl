@@ -20,6 +20,11 @@ sysl run . -- mydata.db
 sysl run .                  # no file named, so an in-memory database
 ```
 
+Needs sysl **0.0.23 or newer**. Older versions bound a dependency's top-level *directory* rather than
+its modules, so all three packages here — each laid out as `sh/sysl/<name>/` — claimed the single
+name `sh` and refused to resolve together. This is the program that found it: one dependency binds
+`sh` with nothing to collide with, so the shape that fails is the shape nobody had written.
+
 ```
 sqlite> CREATE TABLE stock (item TEXT, qty INTEGER, note TEXT)
 ok
