@@ -3,3 +3,4 @@
 .sysl/
 .sqlite-repl-history
 *.db
+sqlite-repl
