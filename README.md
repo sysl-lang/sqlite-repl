@@ -107,12 +107,17 @@ sysl.sum         the digest of what was fetched, written by the first run
   moved underneath it. `add` renders each cell as it is handed over, which is what makes the loop
   safe rather than lucky.
 
-- **A line holding two statements is refused rather than half-run.** The binding compiles a single
-  statement and passes SQLite no pointer to whatever followed it, so `CREATE TABLE a (x); INSERT INTO
-  a VALUES (1)` would run the `CREATE` and drop the `INSERT` silently. Refusing is the honest answer
-  while that is true. The scan that decides knows a semicolon inside a quoted string is not a
-  separator — SQL escapes a quote by doubling it, which needs no case of its own — so
-  `SELECT ';' AS semi` is one statement and is run.
+- **A line may hold several statements, and each is run and reported in turn.** `CREATE TABLE a (x);
+  INSERT INTO a VALUES (1)` runs both. That is `Db.statements`, the binding's cursor over
+  `sqlite3_prepare_v2`'s trailing-text pointer: SQLite compiles the first statement and says where
+  the rest begins, so reaching the second one is a matter of receiving that pointer.
+
+  This program used to refuse such a line, because the binding passed null for it — and the refusal
+  needed a quote-aware scan of its own to know that the semicolon in `SELECT ';' AS semi` is not a
+  separator. **The whole of that scan is gone**, and SQLite decides where a statement ends, which it
+  was always going to be better at. It is the clearest thing this example has to say about binding a
+  C library: the workaround was in the consumer and the gap was in the binding, and closing the gap
+  is measured by the workaround disappearing.
 
 - **Numbers are not right-aligned**, though the table package would do it. Deciding which columns are
   numeric means asking SQLite the type of each column, and the binding does not offer

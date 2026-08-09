@@ -18,10 +18,12 @@
 //     sysl run . -- mydata.db
 //     sysl run .                  -- no file named, so an in-memory database
 //
-// **One statement per line.** The binding compiles a single statement and passes SQLite no pointer to
-// whatever followed it, so a line holding two would run the first and drop the rest silently. Rather
-// than let that happen this refuses the line, which is the one place this program looks at SQL text
-// instead of handing it straight over.
+// **A line may hold several statements**, separated by semicolons, and each is run and reported in
+// turn. That is `Db.statements`, the binding's cursor over SQLite's trailing-text pointer: SQLite
+// compiles the first statement of a piece of text and says where the rest begins, so reaching the
+// second one is a matter of receiving that pointer. This program used to refuse such a line, with a
+// quote-aware scan of its own, because the binding passed null for it -- so the whole of that scan
+// is gone, and this no longer looks at SQL text at all before handing it over.
 
 import sh.sysl.linenoise.{history_add, history_load, history_save, history_set_max_len, read}
 import sh.sysl.sqlite.{Db, Query, open}
@@ -112,19 +114,31 @@ show(q: Query, style: Style) -> Result[int, string]
     Ok(rows)
 end show
 
-// Compile one statement, run it, and say what came of it.
+// Compile and run everything the line holds, saying what came of each statement in turn.
+//
+// The walk is stepped rather than iterated because a `for` loop iterates a copy of its iterator, and
+// the message a refused piece of SQL leaves behind would then be read off a cursor that never moved.
+// So the question is put to the cursor itself, after the loop: a walk that ran out of text and one
+// that hit SQL SQLite would not compile both stop the same way.
+run(db: Db, sql: string, style: Style)
+    var walk = db.statements(sql)
+
+    loop
+        walk.next() match
+            None -> break
+            Some(q) -> run_one(q, style)
+
+    walk.error() match
+        Some(why) -> fail(why)
+        None -> ()
+end run
+
+// One compiled statement, run and reported.
 //
 // The statement is finalized on every path including the failing ones. sysl has no destructor, so a
 // handle nobody was told to release is a handle SQLite still holds -- and a `Query` is C's storage
 // rather than this program's.
-run(db: Db, sql: string, style: Style)
-    val asked = db.prepare(sql)
-
-    if asked.is_err()
-        fail(asked.unwrap_err())
-        return
-
-    val q = asked.unwrap()
+run_one(q: Query, style: Style)
     // Asked before the statement is finalized and kept, not asked again after. `finalize` releases
     // SQLite's storage, and every method here is a call through a handle into it -- so a question
     // put to a `Query` afterwards reads memory the library has taken back.
@@ -141,39 +155,7 @@ run(db: Db, sql: string, style: Style)
         if ncols == 0 then print("ok")
         elif n == 1 then print("1 row")
         else print(s"$n rows")
-end run
-
-// Whether a line holds more than one statement, which this program will not run.
-//
-// It is a text scan and not a parse, so it has to know what a semicolon inside quotes looks like:
-// SQL escapes a quote by doubling it, and a doubled quote reads here as a close immediately followed
-// by an open, which lands in the same state and needs no case of its own. A trailing semicolon is
-// not a second statement -- everyone types one -- so what is counted is a semicolon with something
-// other than blanks after it.
-multiple(sql: string) -> bool
-    val b = sql.bytes
-
-    // Zero is not a byte any SQL holds, so it does for "not inside quotes" and saves carrying a
-    // second flag beside the quote character.
-    var quote: u8 = 0
-
-    for i in 0..<b.len
-        val c = b[i]
-
-        if quote != 0
-            if c == quote then quote = 0
-        elif c == u8('\'') || c == u8('"')
-            quote = c
-        elif c == u8(';')
-            var j = i + 1
-
-            while j < b.len && b[j].is_space()
-                j += 1
-
-            if j < b.len then return true
-
-    false
-end multiple
+end run_one
 
 // -- The commands that are not SQL -------------------------------------------------------------------
 
@@ -196,7 +178,8 @@ help()
     print("  .style <name>    plain, ascii, light, heavy, double, rounded, markdown")
     print("  .quit            leave, saving the history")
     print("")
-    print("  Anything else is one SQL statement. Ctrl-D leaves too.")
+    print("  Anything else is SQL -- several statements to a line if you like.")
+    print("  Ctrl-D leaves too.")
 end help
 
 // -- The loop ----------------------------------------------------------------------------------------
@@ -261,8 +244,6 @@ main(args: []string)
                                     None -> fail(s"there is no style called ${parts[1]}")
                         else
                             fail(s"there is no command called $name -- try .help")
-                    elif multiple(text)
-                        fail("one statement at a time -- this prompt compiles a single statement")
                     else
                         run(db, text, style)
 
