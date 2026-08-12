@@ -23,10 +23,10 @@ dependencies {
 
 // The union of what the three ask for, said again here because a program states its own needs rather
 // than inheriting them silently: `os` for the database file, `posix` for the terminal linenoise puts
-// into raw mode, and `alloc` because every row of every answer is storage whose size nobody knows
+// into raw mode, and `heap` because every row of every answer is storage whose size nobody knows
 // until the query has run.
 requires {
   os    = true
   posix = true
-  alloc = true
+  heap  = true
 }
