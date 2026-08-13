@@ -16,9 +16,21 @@ table       lays the rows out so the columns line up
 ## Run it
 
 ```
-sysl run . -- mydata.db
-sysl run .                  # no file named, so an in-memory database
+SQLITE_H=$(xcrun --show-sdk-path)/usr/include      # macOS; on Linux it is /usr/include
+sysl run . --include-path sqlite3=$SQLITE_H -- mydata.db
+sysl run . --include-path sqlite3=$SQLITE_H        # no file named, so an in-memory database
 ```
+
+**The flag is the `sqlite3` package saying it does not carry SQLite's header**, and it is the one
+thing here that is not just `sysl run .`. That package's C includes `<sqlite3.h>`, no copy of it is in
+the package, and `package.hocon` there declares as much — so a build has to be told where one is, by
+that name. The other two dependencies carry their own C and ask for nothing.
+
+On macOS this points at a directory clang searches anyway. It is still required, deliberately: a bare
+`--include-path` does not answer a declaration, because the check asks what a build says it has
+rather than what it might happen to find. On a Linux box with no `libsqlite3-dev` it is the whole
+difference between a refusal that names what to install and `fatal error: 'sqlite3.h' file not found`
+out of a package you did not write.
 
 Needs sysl **0.0.23 or newer**. Older versions bound a dependency's top-level *directory* rather than
 its modules, so all three packages here — each laid out as `sh/sysl/<name>/` — claimed the single
