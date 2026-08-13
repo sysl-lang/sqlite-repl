@@ -11,9 +11,10 @@
 //
 // **Nothing here glues them together, and that is the point worth reading.** There is no adapter, no
 // shared type and no configuration passed between packages. `read` answers with an `Option[string]`,
-// `text_at` answers with a `Result[Option[string], string]`, and `add` takes anything that renders --
-// so the seams are the standard module's own types, which all three were written against separately.
-// A program is what happens when those line up.
+// `text_at` with a `Result[Option[string], Error]`, and `add` takes anything that renders -- so the
+// seams are `Option`, `Result` and `Display`, which all three packages were written against
+// separately. A program is what happens when those line up: sqlite's own error type reaches the
+// screen through `fail` below without anything on the way knowing what it is, because it renders.
 //
 //     sysl run . -- mydata.db
 //     sysl run .                  -- no file named, so an in-memory database
@@ -26,7 +27,7 @@
 // is gone, and this no longer looks at SQL text at all before handing it over.
 
 import sh.sysl.linenoise.{history_add, history_load, history_save, history_set_max_len, read}
-import sh.sysl.sqlite.{Db, Query, open}
+import sh.sysl.sqlite.{Db, Error, Query, open}
 import sh.sysl.table.*
 import sysl.buf.{Buf, buf}
 import sysl.text.{Ascii, Search, fields}
@@ -52,7 +53,7 @@ fail(why: string) = eprints(s"error: $why\n")
 //
 // The answer is the row count so that this and `show` have one shape between them, and for a
 // statement with no columns it is always zero.
-drain(q: Query) -> Result[int, string]
+drain(q: &Query) -> Result[int, Error]
     var going = true
 
     while going
@@ -69,7 +70,7 @@ end drain
 // bytes belong to SQLite and stay valid only until the next `step`, so a row that is not rendered
 // now is a row whose contents have moved. `add` renders each cell as it is handed over, so the
 // storage the table keeps is its own.
-show(q: Query, style: Style) -> Result[int, string]
+show(q: &Query, style: Style) -> Result[int, Error]
     val ncols = q.columns()
 
     var t = table()
@@ -120,7 +121,7 @@ end show
 // the message a refused piece of SQL leaves behind would then be read off a cursor that never moved.
 // So the question is put to the cursor itself, after the loop: a walk that ran out of text and one
 // that hit SQL SQLite would not compile both stop the same way.
-run(db: Db, sql: string, style: Style)
+run(db: &Db, sql: string, style: Style)
     var walk = db.statements(sql)
 
     loop
@@ -129,26 +130,24 @@ run(db: Db, sql: string, style: Style)
             Some(q) -> run_one(q, style)
 
     walk.error() match
-        Some(why) -> fail(why)
+        Some(why) -> fail(s"${why}")
         None -> ()
 end run
 
 // One compiled statement, run and reported.
 //
-// The statement is finalized on every path including the failing ones. sysl has no destructor, so a
-// handle nobody was told to release is a handle SQLite still holds -- and a `Query` is C's storage
-// rather than this program's.
-run_one(q: Query, style: Style)
-    // Asked before the statement is finalized and kept, not asked again after. `finalize` releases
-    // SQLite's storage, and every method here is a call through a handle into it -- so a question
-    // put to a `Query` afterwards reads memory the library has taken back.
+// **Nothing here releases the statement, and there is nothing missing.** A `Query` is a `&`-held object
+// with a destructor, so SQLite's storage goes when the last reference to it does -- which is at the end
+// of this function, on every path including the failing ones. This is where the program used to call
+// `finalize`, with a paragraph about asking the statement its column count *before* releasing it,
+// because every method afterwards would have read memory the library had taken back. Both are gone:
+// the release is not a step, so there is no order to get right.
+run_one(q: &Query, style: Style)
     val ncols = q.columns()
     val outcome = if ncols == 0 then drain(q) else show(q, style)
 
-    q.finalize()
-
     if outcome.is_err()
-        fail(outcome.unwrap_err())
+        fail(s"${outcome.unwrap_err()}")
     else
         val n = outcome.unwrap()
 
@@ -247,5 +246,6 @@ main(args: []string)
                     else
                         run(db, text, style)
 
+    // The database is not closed here, and that is not an omission: the connection goes when the last
+    // reference to it does, which is when `main` returns.
     history_save(HistoryFile)
-    db.close()

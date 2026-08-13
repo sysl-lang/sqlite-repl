@@ -32,10 +32,15 @@ rather than what it might happen to find. On a Linux box with no `libsqlite3-dev
 difference between a refusal that names what to install and `fatal error: 'sqlite3.h' file not found`
 out of a package you did not write.
 
-Needs sysl **0.0.23 or newer**. Older versions bound a dependency's top-level *directory* rather than
-its modules, so all three packages here — each laid out as `sh/sysl/<name>/` — claimed the single
-name `sh` and refused to resolve together. This is the program that found it: one dependency binds
-`sh` with nothing to collide with, so the shape that fails is the shape nobody had written.
+Built and run against sysl **0.0.48**. The floor is `sqlite3` 0.6.0's rather than this program's, since
+the binding reads SQLite's result codes with `c const` and declares the header it needs — neither of
+which the compiler had in the 0.0.23 this file used to name.
+
+That older number is worth keeping for its reason: before 0.0.23 a dependency's top-level *directory*
+was bound rather than its modules, so all three packages here — each laid out as `sh/sysl/<name>/` —
+claimed the single name `sh` and refused to resolve together. This is the program that found it,
+because one dependency binds `sh` with nothing to collide with and the shape that fails is the shape
+nobody had written.
 
 ```
 sqlite> CREATE TABLE stock (item TEXT, qty INTEGER, note TEXT)
@@ -94,21 +99,26 @@ sysl.sum         the digest of what was fetched, written by the first run
 
 - **Nothing glues the packages together, and that is the thing to notice.** There is no adapter, no
   shared type and no configuration passed between them. `read` answers with an `Option[string]`,
-  `text_at` with a `Result[Option[string], string]`, and `add` takes anything that renders — so every
-  seam is one of the standard module's own types, which all three packages were written against
-  separately and none of them agreed with the others about.
+  `text_at` with a `Result[Option[string], Error]`, and `add` takes anything that renders — so every
+  seam is `Option`, `Result` or `Display`, which all three packages were written against separately
+  and none of them agreed with the others about. sqlite's own error type reaches the screen through a
+  function that knows nothing about it, because it renders.
 
 - **A row is built at run time out of values, not strings.** How many columns a query has is not
   known until it has been compiled, so each row is a `Buf[&Display]` filled in a loop and handed to
   `add`. A `&Display` is what lets a cell be any type that renders; the REPL's cells all happen to be
   text, but nothing in the table package knows that.
 
-- **`finalize` is asked nothing afterwards.** Every method on a `Query` is a call through a handle
-  into SQLite's storage, and `finalize` gives that storage back — so the column count is taken
-  *before* and kept. Asking again after is a use-after-free that segfaults with no output at all,
-  because the crash discards whatever stdout had buffered. It is the one mistake this program made
-  while it was being written, and it is written down here because a binding to a library that
-  allocates is exactly where it is waiting.
+- **Nothing here releases anything, and this is where that changed.** The program used to call
+  `finalize` on every statement and `close` on the database, and it carried a paragraph explaining
+  that a `Query`'s column count had to be taken *before* the `finalize` — because asking afterwards
+  was a use-after-free that segfaulted with no output at all, the crash discarding whatever stdout had
+  buffered. That was the one mistake this program made while it was being written.
+
+  **It is not a mistake that can be made now.** `sqlite3` 0.6.0 holds both handles behind a `&` with a
+  destructor, so a statement is finalized when the last reference to it goes and a connection is closed
+  after the last statement compiled from it — the order SQLite requires, kept by the type rather than
+  by a comment. Six lines went, and so did the paragraph that used to be here warning about them.
 
 - **A text column is read for two different failures.** `Ok(None)` is SQL NULL and `Err` is bytes
   that are not UTF-8, and they are not the same thing — NULL is shown as `NULL` rather than as an
