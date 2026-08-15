@@ -16,23 +16,25 @@ table       lays the rows out so the columns line up
 ## Run it
 
 ```
-SQLITE_H=$(xcrun --show-sdk-path)/usr/include      # macOS; on Linux it is /usr/include
-sysl run . --include-path sqlite3=$SQLITE_H -- mydata.db
-sysl run . --include-path sqlite3=$SQLITE_H        # no file named, so an in-memory database
+sysl run . -- mydata.db
+sysl run .                 # no file named, so an in-memory database
 ```
 
-**The flag is the `sqlite3` package saying it does not carry SQLite's header**, and it is the one
-thing here that is not just `sysl run .`. That package's C includes `<sqlite3.h>`, no copy of it is in
-the package, and `package.hocon` there declares as much — so a build has to be told where one is, by
-that name. The other two dependencies carry their own C and ask for nothing.
+**This used to open with an `xcrun --show-sdk-path` and carry a flag on every line.** The `sqlite3`
+package does not vendor SQLite's header — its C includes `<sqlite3.h>` and no copy is in the package —
+so a build had to be told where one was. It now *names* SQLite instead, and pkg-config answers, on
+macOS and on Linux alike. The other two dependencies carry their own C and ask for nothing.
 
-On macOS this points at a directory clang searches anyway. It is still required, deliberately: a bare
-`--include-path` does not answer a declaration, because the check asks what a build says it has
-rather than what it might happen to find. On a Linux box with no `libsqlite3-dev` it is the whole
-difference between a refusal that names what to install and `fatal error: 'sqlite3.h' file not found`
-out of a package you did not write.
+The reason for insisting on the flag has not gone away, it has been answered better. A bare
+`--include-path` still does not satisfy a declaration, because the check asks what a build says it has
+rather than what it might happen to find — and on a Linux box with no `libsqlite3-dev` the refusal
+still names what to install rather than leaving you with `fatal error: 'sqlite3.h' file not found` out
+of a package you did not write. What changed is that saying it is no longer your job.
 
-Built and run against sysl **0.0.48**. The floor is `sqlite3` 0.6.0's rather than this program's, since
+`--include-path sqlite3=<dir>` still answers it, and takes precedence, on a machine with no
+pkg-config.
+
+Built and run against sysl **0.0.56**. The floor is `sqlite3` 0.6.1's rather than this program's, since
 the binding reads SQLite's result codes with `c const` and declares the header it needs — neither of
 which the compiler had in the 0.0.23 this file used to name.
 
